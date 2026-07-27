@@ -1,0 +1,21 @@
+# 天津日报知识库 (RAG) 项目依赖
+# ================================
+
+# 爬虫依赖
+requests>=2.28
+beautifulsoup4>=4.11
+lxml>=4.9
+
+# 中文分词
+jieba>=0.42
+
+# TF-IDF 向量检索
+scikit-learn>=1.2
+scipy>=1.10
+numpy>=1.24
+
+# DeepSeek API (兼容 OpenAI SDK)
+openai>=1.0
+
+# 可选：更好的 HTTP 服务性能
+# gunicorn>=21.0

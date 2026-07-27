@@ -1,0 +1,45 @@
+天津日报智能知识库 V0.1
+
+概述
+基于天津日报数字报(epaper.tianjinwe.com)的内容知识库，支持 TF-IDF 全文检索与 DeepSeek V4 Pro AI 智能问答。
+
+数据规模
+  采集范围: 2025-07-21 ~ 2026-07-26
+  文章总数: 21,278 篇
+  数据文件: 358 天
+
+技术栈
+  Python 3 + jieba 分词 + TF-IDF 向量检索 + DeepSeek V4 Pro API + SSE 流式响应
+
+模块说明
+  tjrb_crawler.py   爬虫：从天津日报数字报采集文章标题、正文、版次、日期
+  build_kb.py       知识库构建：jieba 分词 + TF-IDF 索引 + 元数据
+  rag_engine.py     DeepSeek V4 Pro RAG 引擎：检索增强生成，100 篇全文上下文
+  time_parser.py    自然语言时间解析：支持“最近一周/本月/去年/2026年3月”等
+  kb_server.py      Web 服务：关键词搜索 + AI 智能问答(Tab切换) + 热加载接口
+  tjrb_tokenizer.py 中文分词器模块(jieba)
+  daily_update.py   每日自动更新：爬取 → 重建索引 → 通知服务端热加载
+  run_all.py        一键启动脚本：检查爬虫 → 构建知识库 → 启动服务
+  requirements.txt  Python 依赖清单
+
+API 接口
+  GET  /               搜索页面 + AI 问答页面
+  GET  /api/search?q=  关键词搜索(JSON)
+  POST /api/ask        流式 AI 问答(SSE)，自动解析提问中的时间范围
+  POST /reload         热加载知识库索引(无需重启)
+  GET  /stats          知识库统计信息
+
+模型配置
+  模型: deepseek-v4-pro (1M 上下文)
+  检索篇数: 100 篇
+  单篇截断: 不截断(全文)
+  最大输出: 8192 tokens
+
+启动方式
+  export DEEPSEEK_API_KEY='sk-...'
+  python3 kb_server.py
+  http://localhost:8699
+
+每日更新
+  crontab -e
+  30 8 * * * cd /home/qinjinqi/ai_project/tj_daily_rag && /usr/bin/python3 daily_update.py >> logs/daily.log 2>&1
