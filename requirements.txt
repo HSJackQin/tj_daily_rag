@@ -19,8 +19,3 @@ openai>=1.0
 
 # HTTP 客户端（强制绕过代理）
 httpx>=0.27
-
-# V0.2: BGE-M3 混合检索
-FlagEmbedding>=1.3
-sentence-transformers>=2.7
-torch>=2.0

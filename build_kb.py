@@ -205,11 +205,8 @@ def stats(kb_dir):
 if __name__ == '__main__':
     if len(sys.argv) < 2:
         print("用法:")
-        print("  python3 build_kb.py --build              # 构建知识库 (TF-IDF + BGE-M3)")
-        print("  python3 build_kb.py --build-tfidf        # 仅构建 TF-IDF 索引")
-        print("  python3 build_kb.py --build-embedding    # 仅构建 BGE-M3 嵌入索引")
+        print("  python3 build_kb.py --build              # 构建知识库 (TF-IDF)")
         print("  python3 build_kb.py --search '关键词'     # TF-IDF 搜索")
-        print("  python3 build_kb.py --search-hybrid '关键词'  # 混合检索测试")
         print("  python3 build_kb.py --stats              # 统计信息")
         sys.exit(1)
 
@@ -221,36 +218,7 @@ if __name__ == '__main__':
             print("❌ 未找到任何数据，请先运行爬虫")
             sys.exit(1)
         build_tfidf_index(articles, KB_DIR)
-        print(f"\n✅ TF-IDF 索引构建完成！")
-
-        # 构建 BGE-M3 嵌入索引
-        print("\n" + "=" * 50)
-        try:
-            from embedding_engine import build_embedding_index
-            build_embedding_index(articles, KB_DIR)
-            print(f"\n✅ BGE-M3 嵌入索引构建完成！")
-        except ImportError:
-            print("\n⚠ 未安装 FlagEmbedding，跳过 BGE-M3 索引构建")
-            print("  安装: pip install FlagEmbedding")
-
         print(f"\n✅ 知识库构建完成！")
-
-    elif cmd == '--build-tfidf':
-        articles = load_all_articles(DATA_DIR)
-        if not articles:
-            print("❌ 未找到任何数据，请先运行爬虫")
-            sys.exit(1)
-        build_tfidf_index(articles, KB_DIR)
-        print(f"\n✅ TF-IDF 索引构建完成！")
-
-    elif cmd == '--build-embedding':
-        articles = load_all_articles(DATA_DIR)
-        if not articles:
-            print("❌ 未找到任何数据，请先运行爬虫")
-            sys.exit(1)
-        from embedding_engine import build_embedding_index
-        build_embedding_index(articles, KB_DIR)
-        print(f"\n✅ BGE-M3 嵌入索引构建完成！")
 
     elif cmd == '--search':
         if len(sys.argv) < 3:
@@ -270,39 +238,8 @@ if __name__ == '__main__':
         print(f"\n🔍 TF-IDF 搜索: \"{query}\"")
         print_results(results)
 
-    elif cmd == '--search-hybrid':
-        if len(sys.argv) < 3:
-            print("请提供搜索关键词")
-            sys.exit(1)
-        query = sys.argv[2]
-        from embedding_engine import hybrid_search, load_embedding_index
-
-        if not load_embedding_index():
-            print("❌ BGE-M3 嵌入索引未构建，请先运行 --build-embedding")
-            sys.exit(1)
-
-        results = hybrid_search(query, top_k=10)
-        print(f"\n🔍 混合检索 (BGE-M3): \"{query}\"")
-        for i, r in enumerate(results):
-            print(f"\n  {'─'*60}")
-            print(f"  [{i+1}] {r['title']}")
-            print(f"  📊 hybrid={r['score']:.3f}  "
-                  f"dense={r['dense_score']:.3f}  "
-                  f"sparse={r['sparse_score']:.3f}")
-            print(f"  📅 {r['date']} | 📰 {r['section']}")
-            print(f"  📝 {r['summary'][:150]}")
-
     elif cmd == '--stats':
         stats(KB_DIR)
-        # 同时显示嵌入索引状态
-        try:
-            from embedding_engine import load_embedding_index
-            if load_embedding_index():
-                print("  BGE-M3 嵌入索引: ✅ 已就绪")
-            else:
-                print("  BGE-M3 嵌入索引: ❌ 未构建")
-        except Exception:
-            print("  BGE-M3 嵌入索引: ⚠ 模块不可用")
 
     else:
         print(f"未知命令: {cmd}")

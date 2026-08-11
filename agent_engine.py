@@ -171,25 +171,7 @@ def _get_client() -> OpenAI:
 
 
 def _do_search(query: str, date_from=None, date_to=None, top_k=15):
-    """
-    执行搜索。优先使用 BGE-M3 混合检索，回退到 TF-IDF。
-    返回 (articles, method) 元组。
-    """
-    # 尝试混合检索
-    try:
-        from embedding_engine import hybrid_search, is_ready as emb_ready
-        if emb_ready():
-            articles = hybrid_search(
-                query=query,
-                top_k=min(top_k, 30),
-                date_from=date_from if date_from else None,
-                date_to=date_to if date_to else None,
-            )
-            return articles, "hybrid"
-    except Exception:
-        pass
-
-    # 回退到 TF-IDF
+    """TF-IDF 关键词检索"""
     from rag_engine import retrieve
     articles = retrieve(
         query=query,
@@ -592,7 +574,6 @@ if __name__ == "__main__":
         sys.exit(1)
 
     from rag_engine import load_kb
-    from embedding_engine import load_embedding_index
 
     print("=" * 60)
     print("  天津日报 V0.2 Agent 引擎")
@@ -601,9 +582,7 @@ if __name__ == "__main__":
     print("=" * 60)
 
     kb_ok = load_kb()
-    emb_ok = load_embedding_index()
-    print(f"  TF-IDF: {'✅' if kb_ok else '❌'}")
-    print(f"  BGE-M3: {'✅' if emb_ok else '⚠ 未构建，将回退到 TF-IDF'}")
+    print(f"  TF-IDF 知识库: {'✅' if kb_ok else '❌'}")
 
     print("\n输入问题开始对话，输入 quit 退出\n")
 

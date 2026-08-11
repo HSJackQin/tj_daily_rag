@@ -30,7 +30,6 @@ from rag_engine import (
     retrieve,
     ask,
     ask_stream,
-    hybrid_retrieve,
     DEEPSEEK_MODEL,
 )
 

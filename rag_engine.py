@@ -126,44 +126,6 @@ def retrieve(
     return results
 
 
-def hybrid_retrieve(
-    query: str,
-    top_k: int = DEFAULT_TOP_K,
-    date_from: Optional[str] = None,
-    date_to: Optional[str] = None,
-    section_filter: Optional[str] = None,
-) -> list[dict]:
-    """
-    V0.2 混合检索：优先使用 BGE-M3 语义+关键词，回退到 TF-IDF。
-
-    返回格式与 retrieve() 一致，额外包含:
-        dense_score:  语义相似度 (仅混合检索时)
-        sparse_score: 关键词匹配度 (仅混合检索时)
-    """
-    # 尝试 BGE-M3 混合检索
-    try:
-        from embedding_engine import hybrid_search, is_ready as emb_ready
-        if emb_ready():
-            return hybrid_search(
-                query=query,
-                top_k=top_k,
-                date_from=date_from,
-                date_to=date_to,
-                section_filter=section_filter,
-            )
-    except Exception:
-        pass
-
-    # 回退到 TF-IDF
-    return retrieve(
-        query=query,
-        top_k=top_k,
-        date_from=date_from,
-        date_to=date_to,
-        section_filter=section_filter,
-    )
-
-
 # ---------------------------------------------------------------------------
 # 上下文构建
 # ---------------------------------------------------------------------------
