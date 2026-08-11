@@ -72,13 +72,13 @@ AGENT_SYSTEM_PROMPT = """你是一个专业的天津日报信息助手，帮助�
 ## 工作方式
 你可以使用 search_tjrb 工具来搜索天津日报知识库。请按以下步骤工作：
 
-1. **分析问题**：理解用户真正想了解什么
-2. **多角度搜索**：从不同关键词角度搜索，确保信息全面
+1. **深度分析**：先仔细思考用户问题的真正意图、涉及的关键维度、需要覆盖的时间范围
+2. **多角度搜索**：基于你的分析，从不同关键词角度搜索，确保信息全面
 3. **综合回答**：基于搜索到的文章内容，给出准确、有条理的回答
 
 ## 搜索策略
-- 先从最核心的关键词开始搜索
-- 如果结果不够或角度单一，换一组关键词再次搜索
+- 根据你的深度分析，制定搜索计划
+- 从不同角度、不同关键词多次搜索
 - 对于梳理/总结类问题，至少搜索 2-3 次不同角度
 - 时间范围明确的（如"最近一周"、"本月"），搜索时带上日期过滤
 
@@ -86,7 +86,57 @@ AGENT_SYSTEM_PROMPT = """你是一个专业的天津日报信息助手，帮助�
 - 只依据搜索到的文章内容作答，不要编造
 - 引用文章时注明日期和标题（格式：「YYYY-MM-DD《标题》」）
 - 材料整理类问题要结构清晰、有层次
-- 如果信息不足，诚实告知并建议调整搜索条件"""
+- 如果信息不足，诚实告知并建议调整搜索条件
+
+## 工具调用方式
+当你需要搜索时，在回复中插入以下格式的工具调用：
+<tool_call>
+{"name": "search_tjrb", "arguments": {"query": "搜索关键词", "date_from": "YYYY-MM-DD", "date_to": "YYYY-MM-DD", "top_k": 15}}
+</tool_call>
+你可以在一轮中插入多个 tool_call。"""
+
+THINKING_PROMPT = """请对以下问题进行深度分析和拆解，然后制定搜索计划。
+
+在分析中，请思考：
+1. 这个问题的核心是什么？用户真正想了解什么？
+2. 需要从哪些维度/角度来回答？（列出具体的方面）
+3. 每个维度应该用什么关键词搜索？
+4. 需要关注什么时间范围？
+
+分析完毕后，使用 <tool_call> 标签按计划开始搜索。"""
+
+
+def _parse_xml_tool_calls(content: str) -> tuple[list[dict], str]:
+    """
+    从 DeepSeek 的 XML 格式 content 中解析工具调用。
+    返回: (tool_calls列表, 移除tool_call后的纯文本)
+    """
+    import re
+
+    tool_calls = []
+    # 匹配 <tool_call>...</tool_call>
+    pattern = r'<tool_call>\s*(\{.*?\})\s*</tool_call>'
+    matches = re.findall(pattern, content, re.DOTALL)
+
+    for i, json_str in enumerate(matches):
+        try:
+            tc = json.loads(json_str)
+            tool_calls.append({
+                "id": f"call_{i}",
+                "type": "function",
+                "function": {
+                    "name": tc.get("name", "search_tjrb"),
+                    "arguments": json.dumps(tc.get("arguments", {}))
+                }
+            })
+        except json.JSONDecodeError:
+            continue
+
+    # 移除 tool_call 标签，保留纯文本
+    clean_text = re.sub(r'<tool_call>\s*\{.*?\}\s*</tool_call>', '', content, flags=re.DOTALL)
+    clean_text = clean_text.strip()
+
+    return tool_calls, clean_text
 
 
 def _get_client() -> OpenAI:
@@ -226,9 +276,113 @@ def agent_ask(
     search_count = 0
     search_summary = []  # 记录每次搜索的摘要
 
-    # ── Agent 循环 ──
-    yield {"type": "status", "text": "正在分析问题..."}
+    # ── 阶段1: 深度思考 ──
+    yield {"type": "status", "text": "正在深度思考，分析问题..."}
 
+    thinking_messages = [{"role": "system", "content": AGENT_SYSTEM_PROMPT}]
+    if history:
+        thinking_messages.extend(history[-20:])
+    thinking_messages.append({"role": "user", "content": THINKING_PROMPT + "\n\n用户问题：" + user_prompt + time_hint})
+
+    # 非流式调用，让模型深度分析并输出搜索计划
+    thinking_response = client.chat.completions.create(
+        model=DEEPSEEK_MODEL,
+        messages=thinking_messages,
+        tools=TOOLS,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        stream=False,
+    )
+
+    thinking_msg = thinking_response.choices[0].message
+    thinking_content = thinking_msg.content or ""
+
+    # 从思考内容中提取 tool calls（模型可能在思考中就开始搜索）
+    pre_tool_calls = list(thinking_msg.tool_calls) if thinking_msg.tool_calls else []
+    if not pre_tool_calls and thinking_content and '<tool_call>' in thinking_content:
+        pre_tool_calls, thinking_content = _parse_xml_tool_calls(thinking_content)
+
+    # 将思考内容展示给用户
+    if thinking_content:
+        yield {"type": "thinking", "text": thinking_content}
+        yield {"type": "status", "text": "深度分析完成，开始多轮检索..."}
+
+    # 将思考结果加入消息历史
+    messages.append({
+        "role": "assistant",
+        "content": thinking_content,
+    })
+
+    # ── 阶段2: 执行搜索（处理思考阶段可能产生的 tool calls）───
+    if pre_tool_calls:
+        # 将思考中产生的 tool calls 作为第一轮搜索
+        messages[-1]["tool_calls"] = [
+            {
+                "id": tc.id,
+                "type": tc.type if hasattr(tc, 'type') else "function",
+                "function": {
+                    "name": tc.function.name,
+                    "arguments": tc.function.arguments,
+                },
+            }
+            for tc in pre_tool_calls
+        ]
+
+        for tc in pre_tool_calls:
+            if tc.function.name != "search_tjrb":
+                continue
+            search_count += 1
+            try:
+                args = json.loads(tc.function.arguments)
+            except json.JSONDecodeError:
+                args = {"query": tc.function.arguments}
+
+            query = args.get("query", "")
+            k = min(args.get("top_k", 15), 30)
+            df = args.get("date_from") or date_from
+            dt = args.get("date_to") or date_to
+
+            yield {
+                "type": "tool_call",
+                "search_id": search_count,
+                "query": query,
+                "date_from": df,
+                "date_to": dt,
+            }
+
+            articles, method = _do_search(query, date_from=df, date_to=dt, top_k=k)
+            new_count = 0
+            for art in articles:
+                key = (art["title"], art["date"])
+                if key not in all_articles:
+                    all_articles[key] = art
+                    new_count += 1
+
+            yield {
+                "type": "tool_result",
+                "search_id": search_count,
+                "query": query,
+                "count": len(articles),
+                "new_count": new_count,
+                "total_count": len(all_articles),
+                "method": method,
+            }
+
+            search_summary.append({
+                "search_id": search_count,
+                "query": query,
+                "found": len(articles),
+                "method": method,
+            })
+
+            result_text = _format_search_results(articles, ARTICLE_SUMMARY_LEN)
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "content": result_text,
+            })
+
+    # ── 阶段3: Agent 多轮搜索循环 ──
     for round_num in range(MAX_ROUNDS):
         # 非流式调用（带 tools）
         response = client.chat.completions.create(
@@ -242,9 +396,36 @@ def agent_ask(
 
         msg = response.choices[0].message
 
-        # ── 模型要搜索 ──
-        if msg.tool_calls:
-            for tc in msg.tool_calls:
+        # ── 处理 tool calls（标准格式或 DeepSeek XML 格式）───
+        tool_calls = list(msg.tool_calls) if msg.tool_calls else []
+
+        # 如果标准 tool_calls 为空，尝试从 content 中解析 XML 格式
+        if not tool_calls and msg.content and '<tool_call>' in msg.content:
+            tool_calls, clean_content = _parse_xml_tool_calls(msg.content)
+            if tool_calls:
+                # 用清理后的文本替换原始 content
+                msg.content = clean_content
+
+        if tool_calls:
+            # 先附加 assistant 消息（含 tool_calls）
+            messages.append({
+                "role": "assistant",
+                "content": msg.content,
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments,
+                        },
+                    }
+                    for tc in tool_calls
+                ],
+            })
+
+            # 再附加 tool 结果（作为对 tool_calls 的响应）
+            for tc in tool_calls:
                 if tc.function.name != "search_tjrb":
                     continue
 
@@ -297,30 +478,13 @@ def agent_ask(
                     "method": method,
                 })
 
-                # 将结果附加到对话中
+                # 将 tool 结果附加到对话
                 result_text = _format_search_results(articles, ARTICLE_SUMMARY_LEN)
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc.id,
                     "content": result_text,
                 })
-
-            # 将 assistant 消息（含 tool_calls）加入对话
-            messages.append({
-                "role": "assistant",
-                "content": msg.content,
-                "tool_calls": [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments,
-                        },
-                    }
-                    for tc in msg.tool_calls
-                ],
-            })
 
             continue  # 继续下一轮
 

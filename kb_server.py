@@ -584,13 +584,23 @@ function askAI() {
       if (data === '[DONE]') { streamDone = true; return; }
       try {
         var parsed = JSON.parse(data);
-        if (parsed.type === 'status') {
-          // 状态提示（跳过重复的 "正在生成回答"）
-          if (parsed.text.indexOf('生成回答') === -1) {
-            addStep('status',
-              '<span class="agent-step-icon">ℹ️</span>' +
-              '<span class="agent-step-content">' + escapeHtml(parsed.text) + '</span>');
-          }
+        if (parsed.type === 'thinking') {
+          // 深度思考内容 — 折叠展示
+          var thinkDiv = document.createElement('div');
+          thinkDiv.className = 'agent-step agent-step-status';
+          thinkDiv.style.display = 'block';
+          thinkDiv.innerHTML =
+            '<div style="font-size:12px;color:#0369A1;margin-bottom:4px;font-weight:600">' +
+            '🧠 深度分析</div>' +
+            '<div style="font-size:12px;color:#333;line-height:1.6;max-height:250px;overflow-y:auto;white-space:pre-wrap">' +
+            escapeHtml(parsed.text) + '</div>';
+          stepsEl.appendChild(thinkDiv);
+          chatArea.scrollTop = chatArea.scrollHeight;
+        } else if (parsed.type === 'status') {
+          // 状态提示
+          addStep('status',
+            '<span class="agent-step-icon">ℹ️</span>' +
+            '<span class="agent-step-content">' + escapeHtml(parsed.text) + '</span>');
         } else if (parsed.type === 'tool_call') {
           var q = escapeHtml(parsed.query);
           var timeInfo = '';
@@ -685,8 +695,8 @@ function finishAnswer(typingEl, fullAnswer, metadata) {
   var contentEl = typingEl.querySelector('.chat-bubble');
   if (!contentEl) return;
 
-  // 渲染换行
-  contentEl.innerHTML = escapeHtml(fullAnswer).replace(/\n/g, '<br>');
+  // V0.2: Markdown 渲染
+  contentEl.innerHTML = renderMarkdown(fullAnswer);
 
   // V0.2: Agent 搜索统计
   if (metadata && metadata.total_searches) {
@@ -731,6 +741,90 @@ function finishAnswer(typingEl, fullAnswer, metadata) {
     });
   };
   typingEl.appendChild(copyBtn);
+}
+
+// V0.2: 轻量 Markdown → HTML 渲染
+function renderMarkdown(text) {
+  // 先转义 HTML
+  var div = document.createElement('div');
+  div.textContent = text;
+  var html = div.innerHTML;
+
+  var lines = html.split('\n');
+  var result = '';
+  var inList = false;
+  var listType = '';  // 'ul' or 'ol'
+
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i];
+
+    // 空行 → 关闭列表
+    if (/^\s*$/.test(line)) {
+      if (inList) { result += '</' + listType + '>'; inList = false; listType = ''; }
+      continue;
+    }
+
+    // ### 三级标题
+    var h3 = line.match(/^### (.+)/);
+    if (h3) {
+      if (inList) { result += '</' + listType + '>'; inList = false; listType = ''; }
+      result += '<h3 style="font-size:16px;margin:12px 0 6px;font-weight:700">' + h3[1] + '</h3>';
+      continue;
+    }
+
+    // ## 二级标题
+    var h2 = line.match(/^## (.+)/);
+    if (h2) {
+      if (inList) { result += '</' + listType + '>'; inList = false; listType = ''; }
+      result += '<h3 style="font-size:17px;margin:14px 0 8px;font-weight:700">' + h2[1] + '</h3>';
+      continue;
+    }
+
+    // # 一级标题
+    var h1 = line.match(/^# (.+)/);
+    if (h1) {
+      if (inList) { result += '</' + listType + '>'; inList = false; listType = ''; }
+      result += '<h2 style="font-size:19px;margin:16px 0 10px;font-weight:700">' + h1[1] + '</h2>';
+      continue;
+    }
+
+    // 有序列表
+    var ol = line.match(/^(\d+)\.\s(.+)/);
+    if (ol) {
+      if (!inList || listType !== 'ol') {
+        if (inList) result += '</' + listType + '>';
+        result += '<ol style="margin:4px 0;padding-left:20px">';
+        inList = true; listType = 'ol';
+      }
+      result += '<li>' + ol[2] + '</li>';
+      continue;
+    }
+
+    // 无序列表
+    var ul = line.match(/^[-*]\s(.+)/);
+    if (ul) {
+      if (!inList || listType !== 'ul') {
+        if (inList) result += '</' + listType + '>';
+        result += '<ul style="margin:4px 0;padding-left:20px">';
+        inList = true; listType = 'ul';
+      }
+      result += '<li>' + ul[1] + '</li>';
+      continue;
+    }
+
+    // 普通行 → 关闭列表
+    if (inList) { result += '</' + listType + '>'; inList = false; listType = ''; }
+
+    // **bold**
+    line = line.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+
+    result += '<p style="margin:4px 0">' + line + '</p>';
+  }
+
+  // 关闭未闭合的列表
+  if (inList) { result += '</' + listType + '>'; }
+
+  return result;
 }
 
 function escapeHtml(text) {
