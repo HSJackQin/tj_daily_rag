@@ -545,14 +545,12 @@ footer{
         placeholder="用自然语言提问，AI 会从天津日报知识库中检索相关文章并生成回答。&#10;&#10;例如：请帮我梳理近一年天津日报上刊登的关于宣传天津港的内容，并提炼成一篇300字左右，反映天津港近一年亮点成效的文章。"></textarea>
       <div class="qa-actions">
         <button id="qaSubmit" class="qa-btn" onclick="askAI()">&#x1F916; 提问</button>
+        <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:var(--muted);cursor:pointer;user-select:none;white-space:nowrap">
+          <input type="checkbox" id="deepThinkCheck" onchange="updateDeepThink()">
+          🧠 深度思考
+        </label>
         <button class="qa-btn-clear" onclick="clearChat()">清空对话</button>
       </div>
-    </div>
-    <div style="display:flex;align-items:center;gap:12px;margin-bottom:4px">
-      <label style="display:flex;align-items:center;gap:4px;font-size:13px;color:var(--ink);cursor:pointer;user-select:none">
-        <input type="checkbox" id="deepThinkCheck" checked onchange="updateDeepThink()">
-        🧠 深度思考
-      </label>
     </div>
     <div class="qa-examples">
       <span style="font-size:12px;color:var(--muted);margin-right:4px">示例：</span>
