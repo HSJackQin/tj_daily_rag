@@ -67,9 +67,42 @@ def load_tfidf_kb():
 
 
 def tfidf_search(query, top_k=20, date_from=None, date_to=None,
-                 section_filter=None, sort_by="relevance"):
+                 section_filter=None, sort_by="relevance", title_only=False):
     if vectorizer is None:
         return []
+
+    # 提取查询关键词
+    keywords = [w for w in query.strip().split() if len(w) >= 2]
+
+    if title_only:
+        # ── 仅标题模式：直接做关键词匹配，不走 TF-IDF ──
+        results = []
+        for idx, art in enumerate(metadata):
+            if date_from and art["date"] < date_from:
+                continue
+            if date_to and art["date"] > date_to:
+                continue
+            if section_filter and section_filter not in art["section"]:
+                continue
+            title = art["title"]
+            # 计算标题命中关键词的个数和权重
+            matched = 0
+            for kw in keywords:
+                if kw.lower() in title.lower():
+                    matched += 1
+            if matched == 0:
+                continue
+            art = dict(art)
+            # 得分：命中数 / 总关键词数，标题完全命中所有词=1.0
+            art["score"] = matched / len(keywords)
+            results.append(art)
+        # 按得分降序
+        results.sort(key=lambda x: x["score"], reverse=True)
+        if sort_by == "date_desc":
+            results.sort(key=lambda x: x["date"], reverse=True)
+        return results[:top_k]
+
+    # ── 标准 TF-IDF 搜索 + 标题加权 ──
     query_vec = vectorizer.transform([query])
     similarities = cosine_similarity(query_vec, tfidf_matrix)[0]
     ranked = sorted(enumerate(similarities), key=lambda x: x[1], reverse=True)
@@ -84,11 +117,26 @@ def tfidf_search(query, top_k=20, date_from=None, date_to=None,
             continue
         if section_filter and section_filter not in art["section"]:
             continue
+
+        # 标题加权：标题中每命中一个关键词，得分提升 20%
+        title = art["title"]
+        title_match = 0
+        for kw in keywords:
+            if kw.lower() in title.lower():
+                title_match += 1
+        if title_match > 0:
+            boost = 1.0 + 0.2 * title_match
+            score = float(score) * boost
+
         art["score"] = float(score)
         results.append(art)
         if len(results) >= top_k:
             break
-    if sort_by == "date_desc":
+
+    # 标题加权后重排
+    if sort_by == "relevance":
+        results.sort(key=lambda x: x["score"], reverse=True)
+    elif sort_by == "date_desc":
         results.sort(key=lambda x: x["date"], reverse=True)
     return results
 
@@ -416,6 +464,10 @@ footer{
           <option value="relevance" __SORT_RELEVANCE_SEL__>按相关度</option>
           <option value="date_desc" __SORT_DATE_SEL__>按时间从晚到早</option>
         </select>
+        <label style="display:flex;align-items:center;gap:4px;font-size:13px;color:var(--ink);cursor:pointer;user-select:none">
+          <input type="checkbox" name="title_only" value="1" __TITLE_ONLY_CHECKED__ onchange="this.form.submit()">
+          仅匹配标题
+        </label>
         <button class="search-btn" type="submit" style="padding:8px 16px;font-size:13px">筛选</button>
       </div>
     </form>
@@ -916,6 +968,7 @@ class SearchHandler(BaseHTTPRequestHandler):
         date_to = params.get("date_to", [""])[0]
         section = params.get("section", [""])[0]
         sort_by = params.get("sort", ["relevance"])[0]
+        title_only = params.get("title_only", [""])[0] == "1"
 
         # 搜索
         results_html = ""
@@ -926,6 +979,7 @@ class SearchHandler(BaseHTTPRequestHandler):
                 date_to=date_to if date_to else None,
                 section_filter=section if section else None,
                 sort_by=sort_by,
+                title_only=title_only,
             )
             if results:
                 results_html = (
@@ -1013,6 +1067,7 @@ class SearchHandler(BaseHTTPRequestHandler):
             .replace("__SECTION_OPTIONS__", section_options)
             .replace("__SORT_RELEVANCE_SEL__", "selected" if sort_by == "relevance" else "")
             .replace("__SORT_DATE_SEL__", "selected" if sort_by == "date_desc" else "")
+            .replace("__TITLE_ONLY_CHECKED__", "checked" if title_only else "")
             .replace("__RESULTS__", results_html)
             .replace("__KB_INFO__", kb_info)
             .replace("__MODEL_NAME__", DEEPSEEK_MODEL)
@@ -1030,7 +1085,8 @@ class SearchHandler(BaseHTTPRequestHandler):
             self._send_json({"results": [], "error": "No query"})
             return
         sort_by = params.get("sort", ["relevance"])[0]
-        results = tfidf_search(query, top_k=10, sort_by=sort_by)
+        title_only = params.get("title_only", [""])[0] == "1"
+        results = tfidf_search(query, top_k=10, sort_by=sort_by, title_only=title_only)
         self._send_json({
             "results": [
                 {
