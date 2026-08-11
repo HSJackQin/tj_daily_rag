@@ -29,7 +29,7 @@ KB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tjrb_kb")
 
 DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
-DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-pro")
+DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash")
 
 # 检索 & 生成参数（针对 V4 Pro 1M 上下文优化）
 DEFAULT_TOP_K = int(os.environ.get("RAG_TOP_K", "100"))
@@ -46,11 +46,11 @@ _tfidf_matrix = None
 _metadata: list = []
 
 
-def load_kb() -> bool:
+def load_kb(force: bool = False) -> bool:
     """加载 TF-IDF 索引和元数据。返回 True 表示加载成功。"""
     global _kb_loaded, _vectorizer, _tfidf_matrix, _metadata
 
-    if _kb_loaded:
+    if _kb_loaded and not force:
         return True
 
     v_path = os.path.join(KB_DIR, "vectorizer.pkl")
@@ -124,6 +124,44 @@ def retrieve(
         if len(results) >= top_k:
             break
     return results
+
+
+def hybrid_retrieve(
+    query: str,
+    top_k: int = DEFAULT_TOP_K,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    section_filter: Optional[str] = None,
+) -> list[dict]:
+    """
+    V0.2 混合检索：优先使用 BGE-M3 语义+关键词，回退到 TF-IDF。
+
+    返回格式与 retrieve() 一致，额外包含:
+        dense_score:  语义相似度 (仅混合检索时)
+        sparse_score: 关键词匹配度 (仅混合检索时)
+    """
+    # 尝试 BGE-M3 混合检索
+    try:
+        from embedding_engine import hybrid_search, is_ready as emb_ready
+        if emb_ready():
+            return hybrid_search(
+                query=query,
+                top_k=top_k,
+                date_from=date_from,
+                date_to=date_to,
+                section_filter=section_filter,
+            )
+    except Exception:
+        pass
+
+    # 回退到 TF-IDF
+    return retrieve(
+        query=query,
+        top_k=top_k,
+        date_from=date_from,
+        date_to=date_to,
+        section_filter=section_filter,
+    )
 
 
 # ---------------------------------------------------------------------------

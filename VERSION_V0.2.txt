@@ -1,0 +1,41 @@
+天津日报智能知识库 V0.2
+================================
+
+## V0.2 核心升级 (2026-08-09)
+
+### 1. BGE-M3 混合检索 (embedding_engine.py)
+- 稠密向量 (1024维): 语义理解，"智慧港口" ↔ "智能码头"
+- 稀疏/词法向量: 关键词精确匹配，替代 TF-IDF
+- 混合打分: 70% 语义 + 30% 关键词
+- 本地运行，无需外部 API
+
+### 2. Agent 智能问答 (agent_engine.py)
+- 模型自主决策搜索策略（关键词、角度、轮次）
+- OpenAI function-calling 格式，兼容 DeepSeek API
+- 最大 5 轮搜索循环，自动去重合并
+- 前端实时展示搜索过程（搜索中 → 找到 N 篇 → 生成中）
+
+### 3. 前端升级 (kb_server.py)
+- 实时显示 Agent 搜索步骤（状态 → 搜索 → 结果 → 生成）
+- 搜索统计摘要（共搜索 N 次，引用 M 篇文章）
+- 渐进式动画效果
+
+### 4. 检索升级 (rag_engine.py)
+- 新增 hybrid_retrieve(): 优先 BGE-M3 混合检索，回退 TF-IDF
+- 保留原 retrieve() 作为兼容
+
+### 5. 索引构建增强 (build_kb.py)
+- --build: 同时构建 TF-IDF + BGE-M3
+- --build-tfidf / --build-embedding: 独立构建
+- --search-hybrid: 混合检索测试
+
+## 文件变更
+
+| 文件 | 状态 | 说明 |
+|------|------|------|
+| embedding_engine.py | 新建 | BGE-M3 混合检索 |
+| agent_engine.py | 新建 | Agent 循环 + Tool Calling |
+| build_kb.py | 修改 | 增加嵌入索引构建 |
+| rag_engine.py | 修改 | 增加 hybrid_retrieve() |
+| kb_server.py | 修改 | Agent 集成 + 前端升级 |
+| requirements.txt | 修改 | 增加 FlagEmbedding 等依赖 |

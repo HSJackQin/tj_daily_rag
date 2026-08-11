@@ -30,12 +30,17 @@ from rag_engine import (
     retrieve,
     ask,
     ask_stream,
+    hybrid_retrieve,
     DEEPSEEK_MODEL,
 )
+
+# 导入 Agent 引擎 (V0.2)
+from agent_engine import agent_ask
 
 KB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tjrb_kb")
 HOST = "0.0.0.0"
 PORT = 8699
+ACCESS_PASSWORD = os.environ.get("ACCESS_PASSWORD", "")  # 访问密钥，为空则不启用
 
 # ---------------------------------------------------------------------------
 # TF-IDF 检索（复用原有逻辑，保持搜索功能独立）
@@ -212,6 +217,32 @@ header .subtitle{font-size:13px;color:var(--muted)}
   margin-top:6px;display:inline-block;margin-left:12px;
 }
 .result-link:hover{text-decoration:underline}
+/* Login overlay */
+.login-overlay{
+  position:fixed;top:0;left:0;width:100%;height:100%;
+  background:rgba(0,0,0,0.5);display:flex;align-items:center;
+  justify-content:center;z-index:9999;
+}
+.login-box{
+  background:var(--surface);padding:32px 36px;border-radius:var(--radius);
+  box-shadow:0 8px 32px rgba(0,0,0,0.15);text-align:center;max-width:360px;width:90%;
+}
+.login-box h2{font-size:20px;margin-bottom:6px;color:var(--ink)}
+.login-box p{font-size:13px;color:var(--muted);margin-bottom:20px}
+.login-box input{
+  width:100%;padding:12px 16px;font-size:15px;border:2px solid var(--rule);
+  border-radius:var(--radius);font-family:var(--font);outline:none;
+  text-align:center;margin-bottom:12px;
+}
+.login-box input:focus{border-color:var(--accent)}
+.login-box .login-btn{
+  width:100%;padding:10px;font-size:15px;font-weight:600;
+  background:var(--accent);color:#FFF;border:none;border-radius:var(--radius);
+  cursor:pointer;font-family:var(--font);
+}
+.login-box .login-btn:hover{opacity:.9}
+.login-error{color:var(--accent);font-size:12px;margin-top:8px;display:none}
+
 mark{background:#FDE68A;color:#92400E;padding:1px 3px;border-radius:2px}
 .empty{text-align:center;padding:60px 20px;color:var(--muted)}
 .empty h2{font-size:18px;margin-bottom:8px;color:var(--ink)}
@@ -284,6 +315,31 @@ footer{
 .typing-indicator span:nth-child(3){animation-delay:.4s}
 @keyframes blink{0%,60%,100%{opacity:.3}30%{opacity:1}}
 
+/* Agent steps (V0.2) */
+.agent-steps{margin-bottom:8px}
+.agent-step{
+  display:flex;align-items:flex-start;gap:8px;
+  padding:8px 14px;margin-bottom:4px;border-radius:8px;
+  font-size:13px;animation:fadeIn .3s ease;
+}
+@keyframes fadeIn{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
+.agent-step-status{
+  background:#F0F9FF;color:#0369A1;border:1px solid #BAE6FD;
+}
+.agent-step-search{
+  background:#FFF7ED;color:#C2410C;border:1px solid #FED7AA;
+}
+.agent-step-result{
+  background:#F0FDF4;color:#166534;border:1px solid #BBF7D0;
+}
+.agent-step-icon{font-size:15px;flex-shrink:0;line-height:1.4}
+.agent-step-content{flex:1;line-height:1.5}
+.agent-step-query{font-weight:600}
+.agent-step-summary{
+  margin-top:8px;padding-top:6px;border-top:1px solid var(--rule);
+  font-size:12px;color:var(--muted);
+}
+
 /* References in AI answer */
 .ai-refs{
   margin-top:12px;padding-top:10px;border-top:1px solid var(--rule);
@@ -313,6 +369,16 @@ footer{
 </style>
 </head>
 <body>
+
+<div id="loginOverlay" class="login-overlay" style="display:none">
+  <div class="login-box">
+    <h2>&#x1F512; 访问验证</h2>
+    <p>请输入访问密钥</p>
+    <input id="loginInput" type="password" placeholder="请输入密钥" onkeydown="if(event.key==='Enter')doLogin()">
+    <button class="login-btn" onclick="doLogin()">确 认</button>
+    <div class="login-error" id="loginError">密钥错误，请重试</div>
+  </div>
+</div>
 
 <header>
   <div class="header-inner">
@@ -384,6 +450,34 @@ footer{
 </footer>
 
 <script>
+// ===== Login =====
+var ACCESS_PASSWORD = "__ACCESS_PASSWORD__";
+var accessKey = sessionStorage.getItem('tjrb_key') || '';
+
+function doLogin() {
+  var input = document.getElementById('loginInput');
+  var val = input.value.trim();
+  if (val === ACCESS_PASSWORD) {
+    accessKey = val;
+    sessionStorage.setItem('tjrb_key', val);
+    document.getElementById('loginOverlay').style.display = 'none';
+    document.getElementById('loginError').style.display = 'none';
+  } else {
+    document.getElementById('loginError').style.display = 'block';
+    input.value = '';
+    input.focus();
+  }
+}
+
+(function() {
+  if (ACCESS_PASSWORD) {
+    if (accessKey !== ACCESS_PASSWORD) {
+      document.getElementById('loginOverlay').style.display = 'flex';
+      document.getElementById('loginInput').focus();
+    }
+  }
+})();
+
 // ===== Tab Switching =====
 function switchTab(tab) {
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
@@ -447,7 +541,7 @@ function askAI() {
   // 调用流式 API
   fetch('/api/ask', {
     method: 'POST',
-    headers: {'Content-Type': 'application/json'},
+    headers: {'Content-Type': 'application/json', 'X-Access-Key': accessKey},
     body: JSON.stringify({
       question: question,
       date_from: dateFrom || null,
@@ -459,8 +553,13 @@ function askAI() {
     var typingEl = document.getElementById(typingId);
     if (!typingEl) return;
 
-    typingEl.innerHTML = '<div class="chat-bubble" id="' + typingId + '-content"></div>';
+    // V0.2: Agent steps container + answer bubble
+    typingEl.innerHTML =
+      '<div class="agent-steps" id="' + typingId + '-steps"></div>' +
+      '<div class="chat-bubble" id="' + typingId + '-content" style="display:none"></div>';
+    var stepsEl = document.getElementById(typingId + '-steps');
     var contentEl = document.getElementById(typingId + '-content');
+    var answerStarted = false;
 
     var reader = response.body.getReader();
     var decoder = new TextDecoder('utf-8');
@@ -468,6 +567,16 @@ function askAI() {
     var metadata = null;
     var lineBuffer = '';
     var streamDone = false;
+    var searchCount = 0;
+
+    function addStep(type, html) {
+      searchCount++;
+      var div = document.createElement('div');
+      div.className = 'agent-step agent-step-' + type;
+      div.innerHTML = html;
+      stepsEl.appendChild(div);
+      chatArea.scrollTop = chatArea.scrollHeight;
+    }
 
     function processLine(line) {
       if (line.slice(0, 6) !== 'data: ') return;
@@ -475,7 +584,41 @@ function askAI() {
       if (data === '[DONE]') { streamDone = true; return; }
       try {
         var parsed = JSON.parse(data);
-        if (parsed.type === 'chunk') {
+        if (parsed.type === 'status') {
+          // 状态提示（跳过重复的 "正在生成回答"）
+          if (parsed.text.indexOf('生成回答') === -1) {
+            addStep('status',
+              '<span class="agent-step-icon">ℹ️</span>' +
+              '<span class="agent-step-content">' + escapeHtml(parsed.text) + '</span>');
+          }
+        } else if (parsed.type === 'tool_call') {
+          var q = escapeHtml(parsed.query);
+          var timeInfo = '';
+          if (parsed.date_from || parsed.date_to) {
+            timeInfo = ' <span style="color:#9CA3AF">[' +
+              (parsed.date_from || '...') + ' ~ ' + (parsed.date_to || '...') + ']</span>';
+          }
+          addStep('search',
+            '<span class="agent-step-icon">🔍</span>' +
+            '<span class="agent-step-content">正在检索: ' +
+            '<span class="agent-step-query">' + q + '</span>' + timeInfo + '</span>');
+        } else if (parsed.type === 'tool_result') {
+          var sid = parsed.search_id;
+          var n = parsed.count;
+          var total = parsed.total_count;
+          var method = parsed.method === 'hybrid' ? 'BGE-M3混合' : 'TF-IDF';
+          addStep('result',
+            '<span class="agent-step-icon">📄</span>' +
+            '<span class="agent-step-content">找到 <b>' + n + '</b> 篇' +
+            (parsed.new_count !== undefined && parsed.new_count < n ?
+              '（新增 ' + parsed.new_count + ' 篇，累计 ' + total + ' 篇）' :
+              '（累计 ' + total + ' 篇）') +
+            ' <span style="color:#9CA3AF;font-size:11px">[' + method + ']</span></span>');
+        } else if (parsed.type === 'chunk') {
+          if (!answerStarted) {
+            contentEl.style.display = '';
+            answerStarted = true;
+          }
           fullAnswer += parsed.text;
           contentEl.textContent = fullAnswer;
           chatArea.scrollTop = chatArea.scrollHeight;
@@ -484,6 +627,7 @@ function askAI() {
         } else if (parsed.type === 'error') {
           fullAnswer = 'ERROR: ' + (parsed.message || 'unknown');
           contentEl.textContent = fullAnswer;
+          contentEl.style.display = '';
           streamDone = true;
         }
       } catch(e) {}
@@ -543,6 +687,17 @@ function finishAnswer(typingEl, fullAnswer, metadata) {
 
   // 渲染换行
   contentEl.innerHTML = escapeHtml(fullAnswer).replace(/\n/g, '<br>');
+
+  // V0.2: Agent 搜索统计
+  if (metadata && metadata.total_searches) {
+    var summaryDiv = document.createElement('div');
+    summaryDiv.className = 'agent-step-summary';
+    summaryDiv.innerHTML = '📊 共搜索 <b>' + metadata.total_searches + '</b> 次，' +
+      '引用 <b>' + metadata.total_unique_articles + '</b> 篇文章' +
+      (metadata.search_summary ? ' | 关键词: ' +
+        metadata.search_summary.map(function(s){return '"' + escapeHtml(s.query) + '"'}).join(', ') : '');
+    typingEl.appendChild(summaryDiv);
+  }
 
   // 添加参考文章
   if (metadata && metadata.articles && metadata.articles.length > 0) {
@@ -613,6 +768,19 @@ switchTab = function(tab) {
 # ---------------------------------------------------------------------------
 class SearchHandler(BaseHTTPRequestHandler):
 
+    def _auth_ok(self):
+        """检查访问密钥。未设置密钥时直接放行。"""
+        if not ACCESS_PASSWORD:
+            return True
+        key = self.headers.get("X-Access-Key", "")
+        return key == ACCESS_PASSWORD
+
+    def _reject_auth(self):
+        self.send_response(403)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(json.dumps({"error": "invalid access key"}, ensure_ascii=False).encode("utf-8"))
+
     def do_GET(self):
         raw_path = self.path.encode("latin-1").decode("utf-8")
         parsed = urllib.parse.urlparse(raw_path)
@@ -622,6 +790,8 @@ class SearchHandler(BaseHTTPRequestHandler):
         if path == "/" or path == "/search":
             self._serve_search_page(params)
         elif path == "/api/search":
+            if not self._auth_ok():
+                return self._reject_auth()
             self._serve_search_api(params)
         elif path == "/stats":
             self._serve_stats()
@@ -633,8 +803,12 @@ class SearchHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         raw_path = self.path.encode("latin-1").decode("utf-8")
         if raw_path == "/api/ask":
+            if not self._auth_ok():
+                return self._reject_auth()
             self._serve_ask_api()
         elif raw_path == "/reload":
+            if not self._auth_ok():
+                return self._reject_auth()
             self._serve_reload()
         else:
             self.send_response(404)
@@ -747,7 +921,8 @@ class SearchHandler(BaseHTTPRequestHandler):
             .replace("__SORT_DATE_SEL__", "selected" if sort_by == "date_desc" else "")
             .replace("__RESULTS__", results_html)
             .replace("__KB_INFO__", kb_info)
-            .replace("__MODEL_NAME__", DEEPSEEK_MODEL))
+            .replace("__MODEL_NAME__", DEEPSEEK_MODEL)
+            .replace("__ACCESS_PASSWORD__", ACCESS_PASSWORD))
 
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -777,7 +952,7 @@ class SearchHandler(BaseHTTPRequestHandler):
             "total": len(results),
         })
 
-    # ---------- AI 问答 API (流式 SSE) ----------
+    # ---------- AI 问答 API (Agent 流式 SSE, V0.2) ----------
     def _serve_ask_api(self):
         # 读取请求体
         content_length = int(self.headers.get("Content-Length", 0))
@@ -798,7 +973,7 @@ class SearchHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "No question"})
             return
 
-        # 流式响应
+        # 流式响应 (SSE)
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
@@ -806,38 +981,17 @@ class SearchHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
         try:
-            articles = retrieve(question, top_k=15,
-                                date_from=date_from if date_from else None,
-                                date_to=date_to if date_to else None,
-                                section_filter=section if section else None)
-
-            for chunk in ask_stream(question, history=history,
-                                    date_from=date_from if date_from else None,
-                                    date_to=date_to if date_to else None,
-                                    section_filter=section if section else None):
-                if isinstance(chunk, str):
-                    payload = json.dumps({"type": "chunk", "text": chunk},
-                                         ensure_ascii=False)
-                    self.wfile.write(("data: " + payload + "\n\n").encode("utf-8"))
-                    self.wfile.flush()
-                else:
-                    meta = {
-                        "type": "meta",
-                        "articles": [
-                            {
-                                "title": a["title"],
-                                "date": a["date"],
-                                "section": a["section"],
-                                "score": a.get("score", 0),
-                                "source_url": a.get("source_url", ""),
-                            }
-                            for a in chunk.get("articles", [])
-                        ],
-                        "model": chunk.get("model", DEEPSEEK_MODEL),
-                    }
-                    self.wfile.write(
-                        ("data: " + json.dumps(meta, ensure_ascii=False) + "\n\n").encode("utf-8"))
-                    self.wfile.flush()
+            # V0.2: 使用 Agent 引擎（模型自主搜索策略）
+            for event in agent_ask(
+                question,
+                history=history,
+                date_from=date_from if date_from else None,
+                date_to=date_to if date_to else None,
+                section_filter=section if section else None,
+            ):
+                payload = json.dumps(event, ensure_ascii=False)
+                self.wfile.write(("data: " + payload + "\n\n").encode("utf-8"))
+                self.wfile.flush()
 
             self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()
@@ -853,7 +1007,7 @@ class SearchHandler(BaseHTTPRequestHandler):
         """重新加载 TF-IDF 索引和 RAG 知识库，无需重启服务"""
         global vectorizer, tfidf_matrix, metadata
         ok_tfidf = load_tfidf_kb()
-        ok_rag = rag_load_kb()
+        ok_rag = rag_load_kb(force=True)
         if ok_tfidf and ok_rag:
             stats = kb_stats()
             self._send_json({

@@ -17,5 +17,10 @@ numpy>=1.24
 # DeepSeek API (兼容 OpenAI SDK)
 openai>=1.0
 
-# 可选：更好的 HTTP 服务性能
-# gunicorn>=21.0
+# HTTP 客户端（强制绕过代理）
+httpx>=0.27
+
+# V0.2: BGE-M3 混合检索
+FlagEmbedding>=1.3
+sentence-transformers>=2.7
+torch>=2.0
