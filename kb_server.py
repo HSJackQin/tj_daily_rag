@@ -117,7 +117,7 @@ def expand_query(query: str) -> list[str]:
 
 
 def tfidf_search(query, top_k=20, date_from=None, date_to=None,
-                 section_filter=None, sort_by="relevance", title_only=False,
+                 sort_by="relevance", title_only=False,
                  expand=False):
     if vectorizer is None:
         return []
@@ -138,8 +138,6 @@ def tfidf_search(query, top_k=20, date_from=None, date_to=None,
             if date_from and art["date"] < date_from:
                 continue
             if date_to and art["date"] > date_to:
-                continue
-            if section_filter and section_filter not in art["section"]:
                 continue
             title = art["title"]
             # 计算标题命中关键词的个数和权重
@@ -172,8 +170,6 @@ def tfidf_search(query, top_k=20, date_from=None, date_to=None,
             if date_from and art["date"] < date_from:
                 continue
             if date_to and art["date"] > date_to:
-                continue
-            if section_filter and section_filter not in art["section"]:
                 continue
 
             # 标题加权：标题中每命中一个关键词，得分提升 20%
@@ -522,10 +518,6 @@ footer{
       <div class="filters">
         <input type="date" name="date_from" value="__DATE_FROM__" placeholder="开始日期">
         <input type="date" name="date_to" value="__DATE_TO__" placeholder="结束日期">
-        <select name="section">
-          <option value="">全部版面</option>
-          __SECTION_OPTIONS__
-        </select>
         <select name="sort">
           <option value="relevance" __SORT_RELEVANCE_SEL__>按相关度</option>
           <option value="date_desc" __SORT_DATE_SEL__>按时间从晚到早</option>
@@ -1036,7 +1028,6 @@ class SearchHandler(BaseHTTPRequestHandler):
         query = params.get("q", [""])[0].strip()
         date_from = params.get("date_from", [""])[0]
         date_to = params.get("date_to", [""])[0]
-        section = params.get("section", [""])[0]
         sort_by = params.get("sort", ["relevance"])[0]
         title_only = params.get("title_only", [""])[0] == "1"
         expand = params.get("expand", [""])[0] == "1"
@@ -1049,7 +1040,6 @@ class SearchHandler(BaseHTTPRequestHandler):
                 query, top_k=20,
                 date_from=date_from if date_from else None,
                 date_to=date_to if date_to else None,
-                section_filter=section if section else None,
                 sort_by=sort_by,
                 title_only=title_only,
                 expand=expand,
@@ -1115,16 +1105,6 @@ class SearchHandler(BaseHTTPRequestHandler):
                 '<p>请先运行 python3 build_kb.py --build</p></div>'
             )
 
-        # 版面选项
-        sections_set = set()
-        if metadata:
-            for a in metadata:
-                sections_set.add(a["section"])
-        section_options = "".join(
-            '<option value="' + s + '" ' + ('selected' if section == s else '') + '>' + s + '</option>'
-            for s in sorted(sections_set)
-        )
-
         # KB 信息
         kb_info = ""
         if metadata:
@@ -1137,7 +1117,6 @@ class SearchHandler(BaseHTTPRequestHandler):
             .replace("__QUERY_ESC__", query_esc)
             .replace("__DATE_FROM__", date_from)
             .replace("__DATE_TO__", date_to)
-            .replace("__SECTION_OPTIONS__", section_options)
             .replace("__SORT_RELEVANCE_SEL__", "selected" if sort_by == "relevance" else "")
             .replace("__SORT_DATE_SEL__", "selected" if sort_by == "date_desc" else "")
             .replace("__TITLE_ONLY_CHECKED__", "checked" if title_only else "")
