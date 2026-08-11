@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-BGE-M3 混合检索引擎
-- 稠密向量 (1024维): 语义理解，"智慧港口" ↔ "智能码头"
-- 稀疏/词法向量: 关键词精确匹配，类似 TF-IDF 但由模型学习
-- 混合检索: DENSE_WEIGHT * dense + SPARSE_WEIGHT * sparse
+BGE + TF-IDF 混合检索引擎 (V0.2)
+- 稠密向量 (512维): bge-small-zh-v1.5 语义理解
+- 稀疏向量: 现有 jieba TF-IDF 关键词匹配
+- 混合检索: DENSE_WEIGHT * dense + SPARSE_WEIGHT * tfidf
 """
 
 import json
 import os
+import pickle
 import time
 
 import numpy as np
-from scipy.sparse import csr_matrix, load_npz, save_npz
+from scipy.sparse import load_npz
 from sklearn.metrics.pairwise import cosine_similarity
 
 KB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tjrb_kb")
@@ -20,140 +21,133 @@ KB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tjrb_kb")
 DENSE_WEIGHT = float(os.environ.get("HYBRID_DENSE_WEIGHT", "0.7"))
 SPARSE_WEIGHT = float(os.environ.get("HYBRID_SPARSE_WEIGHT", "0.3"))
 
+# bge-small 模型路径
+MODEL_PATH = os.environ.get(
+    "BGE_MODEL_PATH",
+    "/home/qinjinqi/.cache/modelscope/models/BAAI--bge-small-zh-v1.5/snapshots/master"
+)
+
 # 全局状态
 _model = None
-_dense_embeddings = None   # (N, 1024) float16
-_sparse_matrix = None       # CSR (N, vocab_size) float32
+_dense_embeddings = None   # (N, 512) float16
 _metadata = None
 _loaded = False
 
+# TF-IDF（复用现有索引）
+_tfidf_vectorizer = None
+_tfidf_matrix = None
+
 
 def _get_model():
-    """懒加载 BGE-M3 模型（首次调用时下载/加载）"""
+    """懒加载 bge-small 模型"""
     global _model
     if _model is None:
-        from FlagEmbedding import BGEM3FlagModel
-        print("  ⏳ 加载 BGE-M3 模型 (BAAI/bge-m3)...")
-        _model = BGEM3FlagModel("BAAI/bge-m3", use_fp16=True)
-        print("  ✅ BGE-M3 模型就绪")
+        from sentence_transformers import SentenceTransformer
+        model_path = MODEL_PATH if os.path.isdir(MODEL_PATH) else "BAAI/bge-small-zh-v1.5"
+        print(f"  ⏳ 加载 BGE 模型: {model_path}")
+        _model = SentenceTransformer(model_path)
+        print("  ✅ BGE 模型就绪")
     return _model
 
 
+def _load_tfidf():
+    """加载 TF-IDF 索引作为稀疏匹配"""
+    global _tfidf_vectorizer, _tfidf_matrix
+    if _tfidf_vectorizer is not None:
+        return True
+
+    v_path = os.path.join(KB_DIR, "vectorizer.pkl")
+    m_path = os.path.join(KB_DIR, "tfidf_matrix.npz")
+
+    if not all(os.path.exists(p) for p in [v_path, m_path]):
+        return False
+
+    with open(v_path, "rb") as f:
+        _tfidf_vectorizer = pickle.load(f)
+    _tfidf_matrix = load_npz(m_path)
+    return True
+
+
 def load_embedding_index() -> bool:
-    """加载预构建的嵌入索引。返回 True 表示加载成功。"""
-    global _dense_embeddings, _sparse_matrix, _metadata, _loaded
+    """加载预构建的嵌入索引和 TF-IDF。返回 True 表示加载成功。"""
+    global _dense_embeddings, _metadata, _loaded
     if _loaded:
         return True
 
     dense_path = os.path.join(KB_DIR, "dense_embeddings.npy")
-    sparse_path = os.path.join(KB_DIR, "sparse_matrix.npz")
     meta_path = os.path.join(KB_DIR, "metadata.json")
 
-    if not all(os.path.exists(p) for p in [dense_path, sparse_path, meta_path]):
+    if not all(os.path.exists(p) for p in [dense_path, meta_path]):
         return False
 
     _dense_embeddings = np.load(dense_path)
-    _sparse_matrix = load_npz(sparse_path)
     with open(meta_path, "r", encoding="utf-8") as f:
         _metadata = json.load(f)
+
+    # TF-IDF 可选（没有也能跑，但只有语义搜索）
+    if not _load_tfidf():
+        print("  ⚠ TF-IDF 索引未加载，将使用纯语义搜索")
+
     _loaded = True
     return True
 
 
 def build_embedding_index(articles: list, kb_dir: str):
     """
-    构建 BGE-M3 混合索引并保存到磁盘。
+    构建 bge-small 稠密向量索引并保存。
 
     参数:
         articles: 文章列表，每篇需含 search_text 字段
         kb_dir:  索引保存目录
 
     返回:
-        (dense_embeddings, sparse_matrix)
+        dense_embeddings: (N, 512) float16 矩阵
     """
     model = _get_model()
     docs = [a["search_text"] for a in articles]
     n_docs = len(docs)
-    batch_size = 8  # CPU 推理用较小的 batch
 
-    print(f"\n🔨 构建 BGE-M3 嵌入索引...")
+    print(f"\n🔨 构建 BGE 嵌入索引...")
+    print(f"  模型: bge-small-zh-v1.5 (512维)")
     print(f"  文章数: {n_docs}")
     print(f"  混合权重: dense={DENSE_WEIGHT}, sparse={SPARSE_WEIGHT}")
 
-    all_dense = []
-    all_sparse_weights = []
     t_start = time.time()
 
-    for i in range(0, n_docs, batch_size):
-        batch = docs[i : i + batch_size]
-        output = model.encode(
-            batch,
-            return_dense=True,
-            return_sparse=True,
-            batch_size=batch_size,
-            max_length=8192,
-        )
-        all_dense.append(output["dense_vecs"])
-        all_sparse_weights.extend(output["lexical_weights"])
+    # 使用 sentence-transformers 批量编码
+    dense_embeddings = model.encode(
+        docs,
+        batch_size=32,
+        show_progress_bar=True,
+        convert_to_numpy=True,
+        normalize_embeddings=True,  # L2 归一化，直接用点积算相似度
+    )
 
-        done = min(i + batch_size, n_docs)
-        if done % 200 == 0 or done == n_docs:
-            elapsed = time.time() - t_start
-            rate = done / elapsed if elapsed > 0 else 0
-            eta = (n_docs - done) / rate if rate > 0 else 0
-            print(f"    已编码 {done}/{n_docs} 篇 "
-                  f"({done/n_docs*100:.0f}%, {rate:.0f} 篇/秒, "
-                  f"预计剩余 {eta:.0f}s)")
+    # 转为 float16 节省存储
+    dense_embeddings = dense_embeddings.astype(np.float16)
 
-    # 拼接稠密向量
-    dense_embeddings = np.concatenate(all_dense, axis=0).astype(np.float16)
+    elapsed = time.time() - t_start
     print(f"  稠密向量: shape={dense_embeddings.shape}, "
           f"dtype={dense_embeddings.dtype}, "
           f"内存={dense_embeddings.nbytes/1024/1024:.0f}MB")
-
-    # 构建稀疏矩阵 (CSR)
-    # BGE-M3 使用 XLM-Roberta tokenizer，vocab_size = 250002
-    indices = []
-    indptr = [0]
-    data = []
-
-    for weights in all_sparse_weights:
-        if weights:
-            sorted_items = sorted(weights.items())  # 按 token_id 排序
-            for tid, val in sorted_items:
-                indices.append(tid)
-                data.append(val)
-        indptr.append(len(indices))
-
-    # 根据实际出现的最大 token_id 确定 matrix 宽度
-    max_tid = max(indices) if indices else 250001
-    vocab_size = max(max_tid + 1, 250002)
-
-    sparse_matrix = csr_matrix(
-        (data, indices, indptr),
-        shape=(n_docs, vocab_size),
-        dtype=np.float32,
-    )
-    print(f"  稀疏矩阵: shape={sparse_matrix.shape}, "
-          f"nnz={sparse_matrix.nnz}, "
-          f"密度={sparse_matrix.nnz/(n_docs*vocab_size)*100:.3f}%")
+    print(f"  编码速度: {n_docs/elapsed:.0f} 篇/秒 (总耗时 {elapsed:.0f}s)")
 
     # 保存
     os.makedirs(kb_dir, exist_ok=True)
     np.save(os.path.join(kb_dir, "dense_embeddings.npy"), dense_embeddings)
-    save_npz(os.path.join(kb_dir, "sparse_matrix.npz"), sparse_matrix)
-
-    elapsed = time.time() - t_start
-    print(f"  💾 嵌入索引已保存到 {kb_dir} (耗时 {elapsed:.0f}s)")
+    print(f"  💾 嵌入索引已保存到 {kb_dir}")
 
     # 设置全局状态
-    global _dense_embeddings, _sparse_matrix, _metadata, _loaded
+    global _dense_embeddings, _metadata, _loaded
     _dense_embeddings = dense_embeddings
-    _sparse_matrix = sparse_matrix
     _metadata = articles
     _loaded = True
 
-    return dense_embeddings, sparse_matrix
+    # 同时加载 TF-IDF
+    if not _load_tfidf():
+        print("  ⚠ TF-IDF 索引未找到，混合检索将回退为纯语义搜索")
+
+    return dense_embeddings
 
 
 def hybrid_search(
@@ -164,64 +158,51 @@ def hybrid_search(
     section_filter: str | None = None,
 ) -> list[dict]:
     """
-    混合检索：稠密语义 + 稀疏关键词。
+    混合检索：BGE 语义 + TF-IDF 关键词。
 
     返回每篇文章附带:
         score:       混合得分
         dense_score: 语义相似度
-        sparse_score:关键词匹配度
+        sparse_score:TF-IDF 关键词匹配度
     """
     if not _loaded:
         return []
 
     model = _get_model()
-
-    # 编码查询
-    output = model.encode(
-        [query],
-        return_dense=True,
-        return_sparse=True,
-        max_length=8192,
-    )
-    query_dense = output["dense_vecs"][0].astype(np.float32)  # (1024,)
-    query_sparse_weights = output["lexical_weights"][0]        # {token_id: weight}
-
     n_docs = len(_metadata)
 
-    # ── 稠密相似度 ──
-    if _dense_embeddings.dtype == np.float16:
-        dense_scores = cosine_similarity(
-            query_dense.reshape(1, -1), _dense_embeddings.astype(np.float32)
-        )[0]
-    else:
-        dense_scores = cosine_similarity(
-            query_dense.reshape(1, -1), _dense_embeddings
-        )[0]
+    # ── 1. 稠密语义相似度 ──
+    query_vec = model.encode(
+        [query],
+        batch_size=1,
+        show_progress_bar=False,
+        normalize_embeddings=True,
+    )[0].astype(np.float32)
 
-    # ── 稀疏相似度 ──
+    # 已 L2 归一化，点积 = 余弦相似度
+    dense_scores = np.dot(
+        _dense_embeddings.astype(np.float32), query_vec
+    )
+
+    # ── 2. TF-IDF 关键词相似度 ──
     sparse_scores = np.zeros(n_docs, dtype=np.float32)
-    if query_sparse_weights:
-        token_ids = np.array(list(query_sparse_weights.keys()), dtype=np.int32)
-        token_weights = np.array(
-            list(query_sparse_weights.values()), dtype=np.float32
-        )
-        # 构建查询稀疏向量 → 矩阵乘法获取所有文档得分
-        query_sparse_vec = csr_matrix(
-            (token_weights, (np.zeros_like(token_ids), token_ids)),
-            shape=(1, _sparse_matrix.shape[1]),
-            dtype=np.float32,
-        )
-        sparse_scores = query_sparse_vec.dot(_sparse_matrix.T).toarray()[0]
+    if _tfidf_vectorizer is not None and _tfidf_matrix is not None:
+        query_tfidf = _tfidf_vectorizer.transform([query])
+        sparse_scores = cosine_similarity(query_tfidf, _tfidf_matrix)[0]
 
-    # ── 归一化 & 加权融合 ──
+    # ── 3. 归一化 & 加权融合 ──
     if dense_scores.max() > 0:
         dense_scores = dense_scores / dense_scores.max()
     if sparse_scores.max() > 0:
         sparse_scores = sparse_scores / sparse_scores.max()
 
-    hybrid_scores = DENSE_WEIGHT * dense_scores + SPARSE_WEIGHT * sparse_scores
+    has_tfidf = _tfidf_vectorizer is not None and sparse_scores.max() > 0
+    if has_tfidf:
+        hybrid_scores = DENSE_WEIGHT * dense_scores + SPARSE_WEIGHT * sparse_scores
+    else:
+        hybrid_scores = dense_scores  # 纯语义搜索
 
-    # ── 排序 & 过滤 ──
+    # ── 4. 排序 & 过滤 ──
     ranked = sorted(enumerate(hybrid_scores), key=lambda x: x[1], reverse=True)
 
     results = []
@@ -256,7 +237,7 @@ if __name__ == "__main__":
     import sys
 
     if not load_embedding_index():
-        print("❌ 嵌入索引未构建，请先运行 build_kb.py --build")
+        print("❌ 嵌入索引未构建，请先运行 build_kb.py --build-embedding")
         sys.exit(1)
 
     query = sys.argv[1] if len(sys.argv) > 1 else "天津港智慧港口建设"
