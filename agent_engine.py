@@ -213,6 +213,7 @@ def agent_ask(
     section_filter: str | None = None,
     temperature: float = DEFAULT_TEMPERATURE,
     max_tokens: int = DEFAULT_MAX_TOKENS,
+    deep_think: bool = True,
 ):
     """
     Agent 问答 — 生成器，逐条 yield SSE 事件 dict。
@@ -258,46 +259,45 @@ def agent_ask(
     search_count = 0
     search_summary = []  # 记录每次搜索的摘要
 
-    # ── 阶段1: 深度思考 ──
-    yield {"type": "status", "text": "正在深度思考，分析问题..."}
+    # 深度思考关闭时限制轮次
+    max_rounds = MAX_ROUNDS if deep_think else 3
 
-    thinking_messages = [{"role": "system", "content": AGENT_SYSTEM_PROMPT}]
-    if history:
-        thinking_messages.extend(history[-20:])
-    thinking_messages.append({"role": "user", "content": THINKING_PROMPT + "\n\n用户问题：" + user_prompt + time_hint})
+    # ── 阶段1: 深度思考（可选）───
+    pre_tool_calls = []
+    if deep_think:
+        yield {"type": "status", "text": "正在深度思考，分析问题..."}
 
-    # 非流式调用，让模型深度分析并输出搜索计划
-    thinking_response = client.chat.completions.create(
-        model=DEEPSEEK_MODEL,
-        messages=thinking_messages,
-        tools=TOOLS,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        stream=False,
-    )
+        thinking_messages = [{"role": "system", "content": AGENT_SYSTEM_PROMPT}]
+        if history:
+            thinking_messages.extend(history[-20:])
+        thinking_messages.append({"role": "user", "content": THINKING_PROMPT + "\n\n用户问题：" + user_prompt + time_hint})
 
-    thinking_msg = thinking_response.choices[0].message
-    thinking_content = thinking_msg.content or ""
+        thinking_response = client.chat.completions.create(
+            model=DEEPSEEK_MODEL,
+            messages=thinking_messages,
+            tools=TOOLS,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stream=False,
+        )
 
-    # 从思考内容中提取 tool calls（模型可能在思考中就开始搜索）
-    pre_tool_calls = list(thinking_msg.tool_calls) if thinking_msg.tool_calls else []
-    if not pre_tool_calls and thinking_content and '<tool_call>' in thinking_content:
-        pre_tool_calls, thinking_content = _parse_xml_tool_calls(thinking_content)
+        thinking_msg = thinking_response.choices[0].message
+        thinking_content = thinking_msg.content or ""
 
-    # 将思考内容展示给用户
-    if thinking_content:
-        yield {"type": "thinking", "text": thinking_content}
-        yield {"type": "status", "text": "深度分析完成，开始多轮检索..."}
+        pre_tool_calls = list(thinking_msg.tool_calls) if thinking_msg.tool_calls else []
+        if not pre_tool_calls and thinking_content and '<tool_call>' in thinking_content:
+            pre_tool_calls, thinking_content = _parse_xml_tool_calls(thinking_content)
 
-    # 将思考结果加入消息历史
-    messages.append({
-        "role": "assistant",
-        "content": thinking_content,
-    })
+        if thinking_content:
+            yield {"type": "thinking", "text": thinking_content}
+            yield {"type": "status", "text": "深度分析完成，开始多轮检索..."}
+
+        messages.append({"role": "assistant", "content": thinking_content})
+    else:
+        yield {"type": "status", "text": "正在检索相关文章（快速模式）..."}
 
     # ── 阶段2: 执行搜索（处理思考阶段可能产生的 tool calls）───
     if pre_tool_calls:
-        # 将思考中产生的 tool calls 作为第一轮搜索
         messages[-1]["tool_calls"] = [
             {
                 "id": tc.id,
@@ -365,7 +365,7 @@ def agent_ask(
             })
 
     # ── 阶段3: Agent 多轮搜索循环 ──
-    for round_num in range(MAX_ROUNDS):
+    for round_num in range(max_rounds):
         # 非流式调用（带 tools）
         response = client.chat.completions.create(
             model=DEEPSEEK_MODEL,

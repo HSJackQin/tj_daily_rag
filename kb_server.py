@@ -548,6 +548,12 @@ footer{
         <button class="qa-btn-clear" onclick="clearChat()">清空对话</button>
       </div>
     </div>
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:4px">
+      <label style="display:flex;align-items:center;gap:4px;font-size:13px;color:var(--ink);cursor:pointer;user-select:none">
+        <input type="checkbox" id="deepThinkCheck" checked onchange="updateDeepThink()">
+        🧠 深度思考
+      </label>
+    </div>
     <div class="qa-examples">
       <span style="font-size:12px;color:var(--muted);margin-right:4px">示例：</span>
       <span class="qa-example" onclick="useExample(this)">梳理天津港近一年亮点成效，300字文稿</span>
@@ -619,6 +625,10 @@ function clearChat() {
   document.getElementById('chatArea').innerHTML = '';
 }
 
+function updateDeepThink() {
+  // 仅保存状态，下次提问时生效
+}
+
 function askAI() {
   var input = document.getElementById('qaInput');
   var question = input.value.trim();
@@ -651,6 +661,8 @@ function askAI() {
   var dateFrom = dateFromEl ? dateFromEl.value : '';
   var dateTo = dateToEl ? dateToEl.value : '';
   var section = sectionEl ? sectionEl.value : '';
+  var deepThinkEl = document.getElementById('deepThinkCheck');
+  var deepThink = deepThinkEl ? deepThinkEl.checked : true;
 
   // 调用流式 API
   fetch('/api/ask', {
@@ -662,6 +674,7 @@ function askAI() {
       date_to: dateTo || null,
       section: section || null,
       history: chatHistory,
+      deep_think: deepThink,
     }),
   }).then(function(response) {
     var typingEl = document.getElementById(typingId);
@@ -811,6 +824,23 @@ function finishAnswer(typingEl, fullAnswer, metadata) {
 
   // V0.2: Markdown 渲染
   contentEl.innerHTML = renderMarkdown(fullAnswer);
+
+  // V0.2: 将文中引用的文章标题转为超链接
+  if (metadata && metadata.articles) {
+    var html = contentEl.innerHTML;
+    for (var i = 0; i < metadata.articles.length; i++) {
+      var a = metadata.articles[i];
+      if (a.source_url && a.title) {
+        // 转义标题中的正则特殊字符
+        var escapedTitle = a.title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        var link = '<a href="' + a.source_url + '" target="_blank" rel="noopener" ' +
+          'style="color:#DC2626;text-decoration:none;border-bottom:1px dotted #DC2626" ' +
+          'title="' + a.date + ' ' + a.section + '">《' + escapeHtml(a.title) + '》</a>';
+        html = html.replace(new RegExp('《' + escapedTitle + '》', 'g'), link);
+      }
+    }
+    contentEl.innerHTML = html;
+  }
 
   // V0.2: Agent 搜索统计
   if (metadata && metadata.total_searches) {
@@ -1173,6 +1203,7 @@ class SearchHandler(BaseHTTPRequestHandler):
         date_to = data.get("date_to")
         section = data.get("section")
         history = data.get("history", [])
+        deep_think = data.get("deep_think", True)  # 默认开启深度思考
 
         if not question:
             self._send_json({"error": "No question"})
@@ -1193,6 +1224,7 @@ class SearchHandler(BaseHTTPRequestHandler):
                 date_from=date_from if date_from else None,
                 date_to=date_to if date_to else None,
                 section_filter=section if section else None,
+                deep_think=deep_think,
             ):
                 payload = json.dumps(event, ensure_ascii=False)
                 self.wfile.write(("data: " + payload + "\n\n").encode("utf-8"))
