@@ -1039,9 +1039,11 @@ class SearchHandler(BaseHTTPRequestHandler):
         section = params.get("section", [""])[0]
         sort_by = params.get("sort", ["relevance"])[0]
         title_only = params.get("title_only", [""])[0] == "1"
+        expand = params.get("expand", [""])[0] == "1"
 
         # 搜索
         results_html = ""
+        results = []
         if query and vectorizer is not None:
             results = tfidf_search(
                 query, top_k=20,
