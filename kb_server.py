@@ -65,10 +65,68 @@ def load_tfidf_kb():
     return True
 
 
+# ---------------------------------------------------------------------------
+# 查询扩展 (V0.2)
+# ---------------------------------------------------------------------------
+EXPAND_PROMPT = """你是一个搜索词扩展助手。将用户输入的关键词拆分为 2-4 个不同角度的搜索短语，用于在新闻库中检索。
+
+规则：
+1. 保留原意，从不同表述角度拆分
+2. 如果原词包含多个概念，分别组合
+3. 最多 4 个短语，每个 2-8 个字
+4. 严格返回 JSON 格式，不要其他文字
+
+示例：
+输入: "天津港发展"
+输出: {"phrases": ["天津港发展", "天津港 经济 成效", "天津港口 增长"]}
+
+输入: "人工智能产业政策"
+输出: {"phrases": ["人工智能产业政策", "AI 产业发展", "人工智能 政策扶持", "智能科技 产业"]}"""
+
+
+def expand_query(query: str) -> list[str]:
+    """用 DeepSeek 扩展搜索关键词，返回多个搜索短语"""
+    import json as _json
+    try:
+        from agent_engine import _get_client
+        client = _get_client()
+        response = client.chat.completions.create(
+            model=DEEPSEEK_MODEL,
+            messages=[
+                {"role": "system", "content": EXPAND_PROMPT},
+                {"role": "user", "content": f'请扩展: "{query}"'},
+            ],
+            temperature=0.3,
+            max_tokens=200,
+            stream=False,
+        )
+        text = response.choices[0].message.content.strip()
+        # 提取 JSON（可能包裹在 ```json ... ``` 中）
+        if "```" in text:
+            text = text.split("```")[1]
+            if text.startswith("json"):
+                text = text[4:]
+        data = _json.loads(text)
+        phrases = data.get("phrases", [query])
+        # 确保原查询在第一位
+        if query not in phrases:
+            phrases.insert(0, query)
+        return phrases[:5]
+    except Exception:
+        return [query]
+
+
 def tfidf_search(query, top_k=20, date_from=None, date_to=None,
-                 section_filter=None, sort_by="relevance", title_only=False):
+                 section_filter=None, sort_by="relevance", title_only=False,
+                 expand=False):
     if vectorizer is None:
         return []
+
+    # ── 查询扩展 ──
+    if expand and query:
+        phrases = expand_query(query)
+    else:
+        phrases = [query]
 
     # 提取查询关键词
     keywords = [w for w in query.strip().split() if len(w) >= 2]
@@ -101,43 +159,52 @@ def tfidf_search(query, top_k=20, date_from=None, date_to=None,
             results.sort(key=lambda x: x["date"], reverse=True)
         return results[:top_k]
 
-    # ── 标准 TF-IDF 搜索 + 标题加权 ──
-    query_vec = vectorizer.transform([query])
-    similarities = cosine_similarity(query_vec, tfidf_matrix)[0]
-    ranked = sorted(enumerate(similarities), key=lambda x: x[1], reverse=True)
+    # ── TF-IDF 搜索（支持多短语扩展）───
+    seen = {}  # key=(title,date) → best_score
+    for phrase in phrases:
+        query_vec = vectorizer.transform([phrase])
+        similarities = cosine_similarity(query_vec, tfidf_matrix)[0]
+        ranked = sorted(enumerate(similarities), key=lambda x: x[1], reverse=True)
+        for idx, score in ranked:
+            if score < 0.01:
+                continue
+            art = metadata[idx]
+            if date_from and art["date"] < date_from:
+                continue
+            if date_to and art["date"] > date_to:
+                continue
+            if section_filter and section_filter not in art["section"]:
+                continue
+
+            # 标题加权：标题中每命中一个关键词，得分提升 20%
+            title = art["title"]
+            title_match = 0
+            for kw in keywords:
+                if kw.lower() in title.lower():
+                    title_match += 1
+            if title_match > 0:
+                score = float(score) * (1.0 + 0.2 * title_match)
+            else:
+                score = float(score)
+
+            key = (art["title"], art["date"])
+            # 扩展模式下取多短语中的最高分
+            if key not in seen or score > seen[key][0]:
+                seen[key] = (score, art)
+
+    # 去重合并，按得分排序
     results = []
-    for idx, score in ranked:
-        if score < 0.01:
-            continue
-        art = dict(metadata[idx])
-        if date_from and art["date"] < date_from:
-            continue
-        if date_to and art["date"] > date_to:
-            continue
-        if section_filter and section_filter not in art["section"]:
-            continue
-
-        # 标题加权：标题中每命中一个关键词，得分提升 20%
-        title = art["title"]
-        title_match = 0
-        for kw in keywords:
-            if kw.lower() in title.lower():
-                title_match += 1
-        if title_match > 0:
-            boost = 1.0 + 0.2 * title_match
-            score = float(score) * boost
-
-        art["score"] = float(score)
+    for (title, date), (score, art) in seen.items():
+        art = dict(art)
+        art["score"] = score
         results.append(art)
-        if len(results) >= top_k:
-            break
 
-    # 标题加权后重排
     if sort_by == "relevance":
         results.sort(key=lambda x: x["score"], reverse=True)
     elif sort_by == "date_desc":
         results.sort(key=lambda x: x["date"], reverse=True)
-    return results
+
+    return results[:top_k]
 
 
 def highlight(text, query):
@@ -466,6 +533,10 @@ footer{
         <label style="display:flex;align-items:center;gap:4px;font-size:13px;color:var(--ink);cursor:pointer;user-select:none">
           <input type="checkbox" name="title_only" value="1" __TITLE_ONLY_CHECKED__ onchange="this.form.submit()">
           仅匹配标题
+        </label>
+        <label style="display:flex;align-items:center;gap:4px;font-size:13px;color:var(--ink);cursor:pointer;user-select:none">
+          <input type="checkbox" name="expand" value="1" __EXPAND_CHECKED__ onchange="this.form.submit()">
+          ✨ 智能扩展
         </label>
         <button class="search-btn" type="submit" style="padding:8px 16px;font-size:13px">筛选</button>
       </div>
@@ -979,6 +1050,7 @@ class SearchHandler(BaseHTTPRequestHandler):
                 section_filter=section if section else None,
                 sort_by=sort_by,
                 title_only=title_only,
+                expand=expand,
             )
             if results:
                 results_html = (
@@ -1067,6 +1139,7 @@ class SearchHandler(BaseHTTPRequestHandler):
             .replace("__SORT_RELEVANCE_SEL__", "selected" if sort_by == "relevance" else "")
             .replace("__SORT_DATE_SEL__", "selected" if sort_by == "date_desc" else "")
             .replace("__TITLE_ONLY_CHECKED__", "checked" if title_only else "")
+            .replace("__EXPAND_CHECKED__", "checked" if expand else "")
             .replace("__RESULTS__", results_html)
             .replace("__KB_INFO__", kb_info)
             .replace("__MODEL_NAME__", DEEPSEEK_MODEL)
@@ -1085,7 +1158,9 @@ class SearchHandler(BaseHTTPRequestHandler):
             return
         sort_by = params.get("sort", ["relevance"])[0]
         title_only = params.get("title_only", [""])[0] == "1"
-        results = tfidf_search(query, top_k=10, sort_by=sort_by, title_only=title_only)
+        expand = params.get("expand", [""])[0] == "1"
+        results = tfidf_search(query, top_k=10, sort_by=sort_by,
+                               title_only=title_only, expand=expand)
         self._send_json({
             "results": [
                 {
